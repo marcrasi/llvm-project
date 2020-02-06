@@ -175,18 +175,39 @@ doCodeCompletion(SourceFile &SF, StringRef EnteredCode,
 
   Ctx.SourceMgr.setCodeCompletionPoint(BufferID, CodeCompletionOffset);
 
-  const unsigned OriginalDeclCount = SF.getTopLevelDecls().size();
+  // Create a new module and file for the code completion buffer, similar to how
+  // we handle new lines of REPL input.
+  auto *newModule =
+      ModuleDecl::create(Ctx.getIdentifier("REPL_Code_Completion"), Ctx);
+  auto &newSF =
+      *new (Ctx) SourceFile(*newModule, SourceFileKind::REPL, BufferID,
+                            SourceFile::ImplicitModuleImportKind::None);
+  newModule->addFile(newSF);
+
+  // Import the last module.
+  auto *lastModule = SF.getParentModule();
+  ModuleDecl::ImportedModule importOfLastModule{/*AccessPath*/ {}, lastModule};
+  newSF.addImports(SourceFile::ImportedModuleDesc(importOfLastModule,
+                                                  SourceFile::ImportOptions()));
+
+  // Carry over private imports from the last module.
+  SmallVector<ModuleDecl::ImportedModule, 8> imports;
+  lastModule->getImportedModules(imports,
+                                 ModuleDecl::ImportFilterKind::Private);
+  if (!imports.empty()) {
+    SmallVector<SourceFile::ImportedModuleDesc, 8> importsWithOptions;
+    for (auto &import : imports) {
+      importsWithOptions.emplace_back(
+          SourceFile::ImportedModuleDesc(import, SourceFile::ImportOptions()));
+    }
+    newSF.addImports(importsWithOptions);
+  }
 
   PersistentParserState PersistentState;
-  bool Done;
-  do {
-    parseIntoSourceFile(SF, BufferID, &Done, nullptr, &PersistentState);
-  } while (!Done);
-  performTypeChecking(SF, OriginalDeclCount);
+  parseIntoSourceFile(newSF, BufferID, &PersistentState);
+  performTypeChecking(newSF);
 
   performCodeCompletionSecondPass(PersistentState, *CompletionCallbacksFactory);
-
-  SF.truncateTopLevelDecls(OriginalDeclCount);
 
   Ctx.SourceMgr.clearCodeCompletionPoint();
 
@@ -329,11 +350,7 @@ SwiftCompleteCode(SwiftASTContext &SwiftCtx,
         Ctx.SourceMgr.addMemBufferCopy(AugmentedCode, "<REPL Input>");
     const unsigned OriginalDeclCount = EnteredCodeFile->getTopLevelDecls().size();
     PersistentParserState PersistentState;
-    bool Done;
-    do {
-      parseIntoSourceFile(*EnteredCodeFile, BufferID, &Done, nullptr,
-                          &PersistentState);
-    } while (!Done);
+    parseIntoSourceFile(*EnteredCodeFile, BufferID, &PersistentState);
     for (auto it = EnteredCodeFile->getTopLevelDecls().begin() + OriginalDeclCount;
          it != EnteredCodeFile->getTopLevelDecls().end(); it++)
       if (auto *NewValueDecl = dyn_cast<ValueDecl>(*it))
